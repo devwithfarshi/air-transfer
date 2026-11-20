@@ -1,0 +1,658 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b0d12">
+<title>Air Transfer</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2322c55e'/%3E%3Cpath d='M16 7v13m-6-6 6 6 6-6M9 25h14' stroke='%23052e16' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<style>
+  :root {
+    --bg: #0b0d12;
+    --card: rgba(16, 19, 26, 0.86);
+    --line: rgba(255, 255, 255, 0.12);
+    --text: #f3f5f9;
+    --muted: #a3acbb;
+    --idle: #4b5563;
+    --held: #22c55e;
+    --deliver: #3b82f6;
+    --warn: #f59e0b;
+    --bad: #ef4444;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; height: 100%; overflow: hidden;
+    background: var(--bg); color: var(--text);
+    font: 16px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-tap-highlight-color: transparent;
+  }
+  button { font: inherit; }
+
+  /* Camera + landmark overlay. The canvas has the video's exact pixel size and the
+     same object-fit, so both get cropped identically: no coordinate maths needed. */
+  #cam, #overlay {
+    position: fixed; inset: 0; width: 100%; height: 100%;
+    object-fit: cover; transform: scaleX(-1); /* mirror, like a mirror */
+  }
+  #cam { background: #000; }
+
+  /* A glowing frame while a file is waiting to be caught */
+  #frame {
+    position: fixed; inset: 0; pointer-events: none;
+    border: 0 solid var(--held); transition: border-width .25s;
+  }
+  body.HELD #frame { border-width: 6px; animation: pulse 1.4s ease-in-out infinite; }
+  @keyframes pulse { 50% { border-color: rgba(34, 197, 94, 0.35); } }
+
+  .pills {
+    position: fixed; left: 12px; right: 12px;
+    top: max(12px, env(safe-area-inset-top));
+    display: flex; justify-content: space-between; gap: 8px;
+  }
+  .pill {
+    display: flex; align-items: center; gap: 7px;
+    padding: 6px 12px; border-radius: 999px;
+    background: var(--card); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+    font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--bad); flex: none; }
+  .dot.on { background: var(--held); }
+
+  #sheet {
+    position: fixed; left: 12px; right: 12px;
+    bottom: max(12px, env(safe-area-inset-bottom));
+    max-width: 520px; margin: 0 auto;
+    padding: 16px 18px 18px; border-radius: 22px;
+    background: var(--card); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+    border: 1px solid var(--line);
+  }
+  #badge {
+    display: inline-block; padding: 4px 10px; border-radius: 999px;
+    font-size: 12px; font-weight: 700; letter-spacing: .08em;
+    background: var(--idle); color: #fff;
+  }
+  body.HELD #badge { background: var(--held); color: #052e16; }
+  body.DELIVERING #badge { background: var(--deliver); }
+  body.OFFLINE #badge { background: var(--bad); }
+  #title { margin: 10px 0 2px; font-size: 22px; font-weight: 650; overflow-wrap: anywhere; }
+  #sub { color: var(--muted); }
+
+  #steps { display: none; gap: 10px; margin-top: 12px; }
+  body.HELD #steps { display: flex; }
+  .step {
+    flex: 1; padding: 10px; border-radius: 14px; text-align: center;
+    border: 1px solid var(--line); color: var(--muted); transition: all .15s;
+  }
+  .step b { display: block; font-size: 28px; line-height: 1.1; }
+  .step.lit { border-color: var(--held); color: var(--text); background: rgba(34, 197, 94, 0.15); }
+
+  #bar { display: none; height: 6px; margin-top: 12px; border-radius: 3px; background: var(--line); overflow: hidden; }
+  body.HELD #bar { display: block; }
+  #bar i { display: block; height: 100%; background: var(--held); transform-origin: left; }
+
+  #result { display: none; margin-top: 12px; }
+  #result.show { display: block; }
+  #result img { display: block; max-width: 100%; max-height: 32vh; margin: 0 auto 12px; border-radius: 12px; }
+  .row { display: flex; gap: 10px; }
+  .btn {
+    flex: 1; padding: 11px 14px; border-radius: 12px; border: 1px solid var(--line);
+    background: rgba(255, 255, 255, 0.08); color: var(--text); cursor: pointer;
+  }
+  .btn.primary { background: var(--held); border-color: var(--held); color: #052e16; font-weight: 650; }
+
+  /* Loading / errors / "tap to start". Sits under the pills and the sheet, so the
+     transfer state stays visible even when the camera can't start. */
+  #center {
+    position: fixed; inset: 0; display: grid; place-items: start center;
+    padding: 18vh 24px 24px; text-align: center; background: rgba(11, 13, 18, 0.82);
+  }
+  .pills, #sheet { z-index: 2; }
+  #toast { z-index: 3; }
+  #center[hidden] { display: none; }
+  #center h2 { margin: 0 0 8px; font-size: 20px; }
+  #center p { margin: 0 auto 16px; max-width: 34ch; color: var(--muted); }
+  .spinner {
+    width: 34px; height: 34px; margin: 0 auto 14px; border-radius: 50%;
+    border: 3px solid var(--line); border-top-color: var(--held); animation: spin 0.9s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  #toast {
+    position: fixed; left: 50%; top: calc(max(12px, env(safe-area-inset-top)) + 44px);
+    transform: translate(-50%, -8px); opacity: 0; transition: all .2s;
+    max-width: calc(100% - 24px); padding: 9px 14px; border-radius: 12px;
+    background: var(--card); border: 1px solid var(--line); font-size: 14px; pointer-events: none;
+  }
+  #toast.show { opacity: 1; transform: translate(-50%, 0); }
+  #toast.ok { border-color: var(--held); }
+  #toast.warn { border-color: var(--warn); }
+  #toast.bad { border-color: var(--bad); }
+
+  #debug { display: none; margin-top: 10px; font: 12px/1.4 ui-monospace, monospace; color: var(--muted); }
+  body.debug #debug { display: block; }
+</style>
+</head>
+<body class="OFFLINE">
+<video id="cam" playsinline muted autoplay></video>
+<canvas id="overlay"></canvas>
+<div id="frame"></div>
+
+<div class="pills">
+  <div class="pill"><span class="dot" id="connDot"></span><span id="connText">Connecting…</span></div>
+  <div class="pill" id="gesture">Starting camera…</div>
+</div>
+
+<div id="toast"></div>
+
+<section id="sheet">
+  <span id="badge">OFFLINE</span>
+  <div id="title">Connecting to the laptop…</div>
+  <div id="sub">Is server.py running?</div>
+  <div id="steps">
+    <div class="step" id="step1"><b>✊</b>Make a fist</div>
+    <div class="step" id="step2"><b>🖐</b>Open your palm</div>
+  </div>
+  <div id="bar"><i></i></div>
+  <div id="result">
+    <img id="preview" alt="">
+    <div class="row">
+      <button class="btn primary" id="saveBtn">Save again</button>
+      <button class="btn" id="shareBtn" hidden>Share…</button>
+    </div>
+  </div>
+  <div id="debug">
+    <div id="debugText"></div>
+    <div class="row" style="margin-top:8px"><button class="btn" id="debugDrop">Drop now (debug)</button></div>
+  </div>
+</section>
+
+<div id="center">
+  <div>
+    <div class="spinner" id="spinner"></div>
+    <h2 id="centerTitle">Loading hand tracking…</h2>
+    <p id="centerText">Downloading the MediaPipe model (about 8 MB, first time only).</p>
+    <button class="btn primary" id="startBtn" hidden>Start camera</button>
+  </div>
+</div>
+
+<script type="module">
+// =====================================================================================
+// Gesture rules: a line-for-line port of gestures.py. tests/test_gestures.py checks
+// that the constants and the answers match, so change both files together.
+// =====================================================================================
+// --- BEGIN gestures port (keep in sync with gestures.py) ---
+const OPEN_PALM = "OPEN_PALM", FIST = "FIST", NONE = "NONE";
+
+const WRIST = 0;
+const THUMB_TIP = 4;
+const MIDDLE_MCP = 9;
+// [knuckle, fingertip] landmark index pairs: index, middle, ring, pinky
+const FINGERS = [[5, 8], [9, 12], [13, 16], [17, 20]];
+
+// finger ratio = distance(wrist, fingertip) / distance(wrist, knuckle)
+// straight fingers measure ~1.44-1.96, curled ones ~0.71-1.05 (see gestures.py)
+const EXTENDED_MIN = 1.35;
+const CURLED_MAX = 1.15;
+// thumb ratio = distance(thumb tip, middle knuckle) / distance(wrist, middle knuckle)
+const THUMB_TUCKED_MAX = 0.75;
+
+const STABLE_FRAMES = 5;        // frames in a row before a label counts
+const SEQUENCE_WINDOW_S = 2.0;  // max seconds between the two poses
+
+function dist(a, b) {
+  return Math.sqrt((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2);
+}
+
+function fingerRatios(world) {
+  const wrist = world[WRIST];
+  return FINGERS.map(([knuckle, tip]) =>
+    dist(wrist, world[tip]) / Math.max(dist(wrist, world[knuckle]), 1e-9));
+}
+
+function thumbRatio(world) {
+  const palm = dist(world[WRIST], world[MIDDLE_MCP]);
+  return dist(world[THUMB_TIP], world[MIDDLE_MCP]) / Math.max(palm, 1e-9);
+}
+
+// world = 21 [x, y, z] world landmarks (metres) -> OPEN_PALM | FIST | NONE
+function classify(world) {
+  if (!world || world.length !== 21) return NONE;
+  if (dist(world[WRIST], world[MIDDLE_MCP]) < 1e-6) return NONE;
+  const ratios = fingerRatios(world);
+  if (ratios.every((r) => r >= EXTENDED_MIN)) return OPEN_PALM;
+  if (ratios.every((r) => r <= CURLED_MAX) && thumbRatio(world) <= THUMB_TUCKED_MAX) return FIST;
+  return NONE;
+}
+
+// Several hands in view: follow the one covering most of the frame (the nearest).
+function pickPrimaryHand(handsImage) {
+  let bestIndex = null, bestArea = -1;
+  handsImage.forEach((hand, i) => {
+    const xs = hand.map((p) => p[0]), ys = hand.map((p) => p[1]);
+    const area = (Math.max(...xs) - Math.min(...xs)) * (Math.max(...ys) - Math.min(...ys));
+    if (area > bestArea) { bestIndex = i; bestArea = area; }
+  });
+  return bestIndex;
+}
+
+// Only accept a new label after STABLE_FRAMES frames in a row.
+class Debouncer {
+  constructor(frames = STABLE_FRAMES) {
+    this.frames = frames;
+    this.candidate = NONE;
+    this.count = 0;
+    this.stable = NONE;
+  }
+  update(label) {
+    if (label === this.candidate) this.count += 1;
+    else { this.candidate = label; this.count = 1; }
+    if (this.count >= this.frames) this.stable = this.candidate;
+    return this.stable;
+  }
+}
+
+// Fires once when the stable label goes first -> second within `window` seconds.
+class SequenceDetector {
+  constructor(first, second, window = SEQUENCE_WINDOW_S) {
+    this.first = first;
+    this.second = second;
+    this.window = window;
+    this.lastFirstAt = null;
+    this.previous = NONE;
+  }
+  update(stable, now) {
+    let fired = false;
+    if (stable === this.first) {
+      this.lastFirstAt = now;
+    } else if (stable === this.second && this.previous !== this.second) {
+      if (this.lastFirstAt !== null && now - this.lastFirstAt <= this.window) fired = true;
+      this.lastFirstAt = null;
+    }
+    this.previous = stable;
+    return fired;
+  }
+}
+// --- END gestures port ---
+
+// =====================================================================================
+// The page
+// =====================================================================================
+// Keep this version in step with the mediapipe version in requirements.txt.
+const MEDIAPIPE = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.2.3";
+const MODEL_URL = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task";
+
+const $ = (id) => document.getElementById(id);
+const video = $("cam"), canvas = $("overlay"), ctx = canvas.getContext("2d");
+const DEBUG = new URLSearchParams(location.search).has("debug");
+if (DEBUG) document.body.classList.add("debug");
+
+let server = null;        // latest {"type": "state"} message, null while disconnected
+let heldUntil = 0;        // performance.now() at which the held file is released
+let busy = false;         // a drop or download is in flight
+let myTransferId = null;  // a file we dropped and haven't finished downloading
+let lastFile = null;      // { blob, name } of the last file received
+let landmarker = null, HandLandmarker = null;
+
+const debouncer = new Debouncer();
+const dropDetector = new SequenceDetector(FIST, OPEN_PALM);
+
+// A short buzz (Android). Browsers refuse it until the user has tapped the page once.
+function buzz(ms) {
+  if (navigator.vibrate && navigator.userActivation && navigator.userActivation.hasBeenActive) navigator.vibrate(ms);
+}
+
+// ---- Talking to the server --------------------------------------------------------
+
+let ws = null, retryDelay = 500, retryTimer = null;
+
+function connect() {
+  if (ws && ws.readyState <= WebSocket.OPEN) return;  // already connecting / connected
+  clearTimeout(retryTimer);
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  ws = new WebSocket(`${proto}://${location.host}/ws?role=receiver`);
+  ws.onopen = () => { retryDelay = 500; };
+  ws.onmessage = (event) => {
+    const msg = JSON.parse(event.data);
+    if (msg.type === "state") onState(msg);
+    if (msg.type === "notice") toast(msg.text, msg.level);
+  };
+  ws.onclose = () => {
+    server = null;
+    render();
+    retryTimer = setTimeout(connect, retryDelay);
+    retryDelay = Math.min(retryDelay * 2, 5000);
+  };
+}
+
+function onState(msg) {
+  const wasHeld = server && server.state === "HELD";
+  server = msg;
+  if (msg.state === "HELD") {
+    heldUntil = performance.now() + msg.expires_in * 1000;
+    if (!wasHeld) { $("result").classList.remove("show"); buzz(30); }
+  }
+  // We dropped it, then lost the connection before finishing: pick up where we left off.
+  if (msg.state === "DELIVERING" && msg.file && msg.file.id === myTransferId && !busy) {
+    if (lastFile && lastFile.id === msg.file.id) confirmReceived(msg.file.id);  // have it, just confirm
+    else download({ id: msg.file.id, name: msg.file.name, url: `/file/${msg.file.id}` });
+  }
+  render();
+}
+
+// ---- Drop -> download -> save -----------------------------------------------------
+
+async function drop() {
+  if (busy) return;
+  if (!server || server.state !== "HELD") {
+    toast(server && server.state === "DELIVERING" ? "Already receiving…" : "Nothing to catch. Grab a file at the laptop first.");
+    return;
+  }
+  busy = true;
+  buzz(60);
+  try {
+    const response = await fetch("/drop", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: server.file.id }),
+    });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.error || `Drop failed (${response.status})`);
+    myTransferId = body.id;
+    busy = false;
+    await download(body);
+  } catch (err) {
+    toast(err.message, "bad");
+  } finally {
+    busy = false;
+  }
+}
+
+async function download(file) {
+  if (busy) return;
+  busy = true;
+  try {
+    const response = await fetch(file.url, { cache: "no-store" });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      myTransferId = null;
+      throw new Error(body.error || `Download failed (${response.status})`);
+    }
+    const blob = await response.blob();  // resolves only once every byte has arrived
+    lastFile = { blob, name: file.name, id: file.id };
+    saveFile();
+    showResult();
+    toast(`Saved ${file.name}`, "ok");
+    await confirmReceived(file.id);
+  } catch (err) {
+    // Network gone mid-download: myTransferId is still set, so when the socket
+    // reconnects and the server still says DELIVERING, onState() retries.
+    toast(err.message || "Download interrupted", "bad");
+  } finally {
+    busy = false;
+  }
+}
+
+// Tell the laptop we have the whole file, so it can go back to IDLE.
+async function confirmReceived(id) {
+  try {
+    await fetch("/received", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id }),
+    });
+    myTransferId = null;  // any answer at all means the server heard us
+  } catch {
+    // offline right now; onState() tries again when the socket reconnects
+  }
+}
+
+function saveFile() {
+  if (!lastFile) return;
+  const url = URL.createObjectURL(lastFile.blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = lastFile.name;  // -> the phone's Downloads folder
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
+}
+
+function showResult() {
+  const img = $("preview");
+  if (lastFile.blob.type.startsWith("image/")) {
+    if (img.src) URL.revokeObjectURL(img.src);
+    img.src = URL.createObjectURL(lastFile.blob);
+    img.hidden = false;
+  } else {
+    img.hidden = true;
+  }
+  // iOS: the share sheet offers "Save Image" (to Photos), handy if the download is blocked.
+  const file = new File([lastFile.blob], lastFile.name, { type: lastFile.blob.type });
+  $("shareBtn").hidden = !(navigator.canShare && navigator.canShare({ files: [file] }));
+  $("result").classList.add("show");
+}
+
+$("saveBtn").onclick = saveFile;
+$("shareBtn").onclick = () => {
+  const file = new File([lastFile.blob], lastFile.name, { type: lastFile.blob.type });
+  navigator.share({ files: [file] }).catch(() => {});
+};
+$("debugDrop").onclick = drop;
+
+// ---- Screen ------------------------------------------------------------------------
+
+function formatSize(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
+}
+
+function render() {
+  const state = server ? server.state : "OFFLINE";
+  document.body.className = state + (DEBUG ? " debug" : "");
+  $("connDot").classList.toggle("on", !!server);
+  $("connText").textContent = !server ? "Offline, retrying…"
+    : server.senders ? "Laptop connected" : "Server up · sender.py not running";
+
+  const badge = $("badge"), title = $("title"), sub = $("sub");
+  if (!server) {
+    badge.textContent = "OFFLINE";
+    title.textContent = "Connecting to the laptop…";
+    sub.textContent = "Is server.py running, and is this phone on the same Wi-Fi?";
+  } else if (state === "HELD") {
+    badge.textContent = "READY TO RECEIVE";
+    title.textContent = server.file.name;
+    sub.textContent = `${formatSize(server.file.size)} · make a fist at this camera, then open your palm`;
+  } else if (state === "DELIVERING") {
+    badge.textContent = "RECEIVING";
+    title.textContent = server.file.name;
+    sub.textContent = myTransferId === server.file.id || busy ? "Downloading…" : "Another device caught it.";
+  } else {
+    badge.textContent = "IDLE";
+    title.textContent = lastFile && $("result").classList.contains("show") ? `Got ${lastFile.name}` : "Waiting for the laptop";
+    sub.textContent = server.next_file
+      ? `Open your palm, then make a fist at the laptop to grab ${server.next_file}.`
+      : "Put a file in the laptop's outbox folder.";
+  }
+}
+
+function renderCountdown() {
+  if (!server || server.state !== "HELD") return;
+  const left = Math.max(0, heldUntil - performance.now()) / 1000;
+  $("bar").firstElementChild.style.transform = `scaleX(${left / server.hold_seconds})`;
+  $("badge").textContent = `READY TO RECEIVE · ${Math.ceil(left)}s`;
+}
+
+let toastTimer = null;
+function toast(text, level = "info") {
+  const el = $("toast");
+  el.textContent = text;
+  el.className = `show ${level}`;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { el.className = level; }, 3500);
+}
+
+function showCenter(title, text, { spinner = false, button = null } = {}) {
+  $("center").hidden = false;
+  $("centerTitle").textContent = title;
+  $("centerText").textContent = text;
+  $("spinner").hidden = !spinner;
+  $("startBtn").hidden = !button;
+  if (button) { $("startBtn").textContent = button; }
+}
+
+// ---- Camera + hand tracking ---------------------------------------------------------
+
+async function createLandmarker() {
+  // Loaded here rather than with a top-level import, so the rest of the page still
+  // works (and can explain the problem) if the CDN can't be reached.
+  const vision = await import(`${MEDIAPIPE}/vision_bundle.mjs`);
+  HandLandmarker = vision.HandLandmarker;
+  const fileset = await vision.FilesetResolver.forVisionTasks(`${MEDIAPIPE}/wasm`);
+  const options = (delegate) => ({
+    baseOptions: { modelAssetPath: MODEL_URL, delegate },
+    runningMode: "VIDEO",
+    numHands: 2,  // see up to two, then follow the nearest
+    minHandDetectionConfidence: 0.6,
+    minHandPresenceConfidence: 0.6,
+    minTrackingConfidence: 0.5,
+  });
+  try {
+    return await HandLandmarker.createFromOptions(fileset, options("GPU"));
+  } catch (err) {
+    console.warn("GPU delegate unavailable, falling back to CPU:", err);
+    return await HandLandmarker.createFromOptions(fileset, options("CPU"));
+  }
+}
+
+async function startCamera() {
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } },
+    audio: false,
+  });
+  video.srcObject = stream;
+  await video.play();
+  stream.getVideoTracks()[0].addEventListener("ended", () =>
+    showCenter("Camera stopped", "Another app may have taken the camera.", { button: "Restart camera" }));
+  $("center").hidden = true;
+  keepScreenOn();
+}
+
+async function keepScreenOn() {
+  try { await navigator.wakeLock?.request("screen"); } catch { /* not supported: fine */ }
+}
+
+const GESTURE_TEXT = { [OPEN_PALM]: "🖐 Open palm", [FIST]: "✊ Fist", [NONE]: "✋ …" };
+const GESTURE_COLOUR = { [OPEN_PALM]: "#22c55e", [FIST]: "#f59e0b", [NONE]: "#ffffff" };
+let lastVideoTime = -1, frames = 0, fpsSince = performance.now(), fps = 0;
+
+function loop() {
+  requestAnimationFrame(loop);
+  renderCountdown();
+  if (!landmarker || video.readyState < 2 || video.currentTime === lastVideoTime) return;
+  lastVideoTime = video.currentTime;
+
+  const result = landmarker.detectForVideo(video, performance.now());
+  const handsImage = result.landmarks.map((hand) => hand.map((p) => [p.x, p.y, p.z]));
+  const handsWorld = result.worldLandmarks.map((hand) => hand.map((p) => [p.x, p.y, p.z]));
+  const primary = pickPrimaryHand(handsImage);  // null when no hand is in view
+  const raw = primary === null ? NONE : classify(handsWorld[primary]);
+  const stable = debouncer.update(raw);
+  const now = performance.now() / 1000;
+
+  if (dropDetector.update(stable, now)) drop();
+
+  drawHands(handsImage, primary, stable);
+
+  // Status pill + the two step boxes
+  let text = handsImage.length === 0 ? "No hand in view" : GESTURE_TEXT[stable];
+  if (handsImage.length > 1) text += " · 2 hands, using nearest";
+  $("gesture").textContent = text;
+  const fistDone = dropDetector.lastFirstAt !== null && now - dropDetector.lastFirstAt <= SEQUENCE_WINDOW_S;
+  $("step1").classList.toggle("lit", fistDone || stable === FIST);
+  $("step2").classList.toggle("lit", stable === OPEN_PALM && fistDone);
+
+  if (DEBUG) {
+    frames += 1;
+    if (performance.now() - fpsSince > 1000) { fps = frames; frames = 0; fpsSince = performance.now(); }
+    const detail = primary === null ? "" :
+      ` fingers ${fingerRatios(handsWorld[primary]).map((r) => r.toFixed(2)).join(" ")} thumb ${thumbRatio(handsWorld[primary]).toFixed(2)}`;
+    $("debugText").textContent = `${fps} fps · raw ${raw} · stable ${stable}${detail}`;
+  }
+}
+
+function drawHands(hands, primary, stable) {
+  if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
+    canvas.width = video.videoWidth;   // match the video pixel-for-pixel (see the CSS)
+    canvas.height = video.videoHeight;
+  }
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  const w = canvas.width, h = canvas.height;
+  hands.forEach((hand, i) => {
+    const isPrimary = i === primary;
+    ctx.strokeStyle = ctx.fillStyle = isPrimary ? GESTURE_COLOUR[stable] : "rgba(255,255,255,0.35)";
+    ctx.lineWidth = isPrimary ? Math.max(3, w / 160) : 2;
+    ctx.beginPath();
+    for (const { start, end } of HandLandmarker.HAND_CONNECTIONS) {
+      ctx.moveTo(hand[start][0] * w, hand[start][1] * h);
+      ctx.lineTo(hand[end][0] * w, hand[end][1] * h);
+    }
+    ctx.stroke();
+    for (const [x, y] of hand) {
+      ctx.beginPath();
+      ctx.arc(x * w, y * h, ctx.lineWidth * 1.2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  });
+}
+
+async function tryStartCamera() {
+  try {
+    await startCamera();
+  } catch (err) {
+    console.warn(err);
+    $("gesture").textContent = "Camera off";
+    const denied = err && err.name === "NotAllowedError";
+    showCenter(denied ? "Camera permission needed" : "Couldn't start the camera",
+      denied ? "Allow camera access for this site in the browser settings, then tap below."
+             : `${err && err.message ? err.message : err}`,
+      { button: "Start camera" });
+  }
+}
+$("startBtn").onclick = tryStartCamera;
+
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) return;
+  connect();        // phones often kill sockets in the background
+  keepScreenOn();   // the wake lock is dropped whenever the page is hidden
+});
+
+async function boot() {
+  connect();
+  render();
+  requestAnimationFrame(loop);  // runs the countdown now; hand tracking joins once loaded
+  if (!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    showCenter("Camera blocked: this page isn't HTTPS",
+      "Phone browsers only allow the camera on https:// pages. Start server.py with an mkcert " +
+      "certificate (or use a tunnel) and open the https:// address. See README.");
+    $("gesture").textContent = "No camera";
+    return;
+  }
+  showCenter("Loading hand tracking…", "Downloading the MediaPipe model (about 8 MB, first time only).", { spinner: true });
+  try {
+    landmarker = await createLandmarker();
+  } catch (err) {
+    console.error(err);
+    showCenter("Couldn't load hand tracking",
+      "The phone needs internet access to fetch MediaPipe from cdn.jsdelivr.net and the model " +
+      "from storage.googleapis.com. " + (err && err.message ? err.message : ""));
+    return;
+  }
+  await tryStartCamera();
+}
+
+boot();
+</script>
+</body>
+</html>

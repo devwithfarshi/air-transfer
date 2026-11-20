@@ -1,0 +1,9 @@
+# private key + certificates made by mkcert
+certs/
+# hand model, downloaded by sender.py on first run
+models/
+# whatever you put up for grabs
+outbox/*
+!outbox/.gitkeep
+.venv/
+__pycache__/
